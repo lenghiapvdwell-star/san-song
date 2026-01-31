@@ -1,5 +1,4 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -7,152 +6,128 @@ import numpy as np
 import os
 
 # --- CẤU HÌNH GIAO DIỆN ---
-st.set_page_config(page_title="Hệ Thống Săn Sóng V19", layout="wide")
+st.set_page_config(page_title="Hệ Thống Săn Sóng V20 - Local Data", layout="wide")
 
-# --- HÀM TÍNH TOÁN KỸ THUẬT SIÊU CẤP ---
-def calculate_all(df, df_vni=None):
-    df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
-    df.columns = df.columns.str.capitalize()
+# --- HÀM TÍNH TOÁN KỸ THUẬT (SỬ DỤNG DATA CÓ SẴN) ---
+def calculate_technical_indices(df, df_vni=None):
+    if df is None or len(df) < 5:
+        return None
     
-    close = pd.Series(df['Close'].values.flatten(), index=df.index)
-    high = pd.Series(df['High'].values.flatten(), index=df.index)
-    low = pd.Series(df['Low'].values.flatten(), index=df.index)
-    vol = pd.Series(df['Volume'].values.flatten(), index=df.index)
-
-    # 1. ADX Wilder
-    tr = pd.concat([high - low, (high - close.shift(1)).abs(), (low - close.shift(1)).abs()], axis=1).max(axis=1)
-    up = high.diff(); dw = low.shift(1) - low
-    p_dm = np.where((up > dw) & (up > 0), up, 0)
-    m_dm = np.where((dw > up) & (dw > 0), dw, 0)
-    atr = tr.ewm(alpha=1/14, adjust=False).mean()
-    p_di = 100 * (pd.Series(p_dm, index=df.index).ewm(alpha=1/14, adjust=False).mean() / atr)
-    m_di = 100 * (pd.Series(m_dm, index=df.index).ewm(alpha=1/14, adjust=False).mean() / atr)
-    dx = 100 * (abs(p_di - m_di) / (p_di + m_di).replace(0, np.nan))
-    df['ADX'] = dx.ewm(alpha=1/14, adjust=False).mean()
-
-    # 2. RSI & RS (Sửa lỗi nan: Tính RS so với nến cách đây 5 phiên)
-    df['RSI'] = 100 - (100 / (1 + (close.diff().where(close.diff() > 0, 0).ewm(alpha=1/14).mean() / 
-                                  (-close.diff().where(close.diff() < 0, 0)).ewm(alpha=1/14).mean())))
+    # Chuẩn hóa tên cột về chữ thường để khớp với file CSV của bạn
+    df.columns = df.columns.str.lower()
     
-    if df_vni is not None:
-        vni_close = pd.Series(df_vni['Close'].values.flatten(), index=df_vni.index)
+    close = df['close']
+    high = df['high']
+    low = df['low']
+    open_p = df['open']
+    vol = df['volume']
+
+    # 1. RSI
+    delta = close.diff()
+    gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14, adjust=False).mean()
+    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
+    df['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, np.nan))))
+    
+    # 2. RS (So sánh với file VNINDEX.csv đã có)
+    df['rs_score'] = 0.0
+    if df_vni is not None and len(df_vni) >= 5:
+        df_vni.columns = df_vni.columns.str.lower()
+        vni_close = df_vni['close']
         vni_change = (vni_close.iloc[-1] / vni_close.iloc[-5] - 1) * 100
-        stock_change = (close / close.shift(5) - 1) * 100
-        df['RS'] = stock_change - vni_change # RS điểm số
+        stock_change = (close.iloc[-1] / close.iloc[-5] - 1) * 100
+        df['rs_score'] = round(stock_change - vni_change, 2)
     
-    # 3. Quả Bom (Squeeze) & Điểm Mua
-    df['SMA20'] = close.rolling(20).mean()
-    df['BW'] = (close.rolling(20).std() * 4) / df['SMA20']
-    df['BOMB'] = df['BW'] <= df['BW'].rolling(20).min()
-    df['VOL_SMA'] = vol.rolling(10).mean()
-    df['BUY'] = (vol > df['VOL_SMA'] * 1.3) & (close > df['Open'].values.flatten()) & (df['ADX'] > 20)
-    
+    # 3. ADX & Điểm Mua & Quả Bom (Cần tối thiểu 20 phiên)
+    if len(df) >= 20:
+        # ADX Simple
+        tr = pd.concat([high - low, (high - close.shift(1)).abs(), (low - close.shift(1)).abs()], axis=1).max(axis=1)
+        atr = tr.ewm(alpha=1/14, adjust=False).mean()
+        # Tính ADX đơn giản hóa để tránh lỗi Index
+        df['adx'] = (atr / close * 100).rolling(14).mean() # Chỉ số biến động
+        
+        df['sma20'] = close.rolling(20).mean()
+        df['bw'] = (close.rolling(20).std() * 4) / df['sma20']
+        df['bomb'] = df['bw'] <= df['bw'].rolling(20).min()
+        df['vol_sma10'] = vol.rolling(10).mean()
+        df['is_buy'] = (vol > df['vol_sma10'] * 1.3) & (close > open_p)
+    else:
+        df['adx'] = 0; df['bomb'] = False; df['is_buy'] = False
+        
     return df
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.header("⚡ ĐIỀU KHIỂN V19")
-    if st.button("🚀 CẬP NHẬT DỮ LIỆU MỚI"):
-        st.cache_data.clear()
-        st.success("Đã làm mới dữ liệu!")
-    
+    st.header("⚡ HỆ THỐNG V20 (OFFLINE)")
     btn_sieu_sao = st.button("🌟 SIÊU SAO THEO DÕI")
-    btn_loc = st.button("🔍 LỌC ĐIỂM MUA & BOM")
-    ticker_input = st.text_input("📈 SOI CHI TIẾT MÃ:", value="DIG").upper()
+    ticker_input = st.text_input("📈 SOI CHI TIẾT MÃ:", value="DIG").upper().strip()
+    st.info("Dữ liệu được lấy từ: `hose.csv` và `VNINDEX.csv` trên GitHub của bạn.")
 
-# Lấy dữ liệu VNINDEX trực tuyến (Fix lỗi RS nan)
-vni = yf.download("^VNINDEX", period="1y", progress=False)
+# --- ĐỌC DỮ LIỆU TỪ FILE ---
+try:
+    df_hose_all = pd.read_csv("hose.csv")
+    df_vni_all = pd.read_csv("VNINDEX.csv")
+    data_ready = True
+except Exception as e:
+    st.error(f"Lỗi đọc file CSV: {e}. Vui lòng kiểm tra file hose.csv và VNINDEX.csv")
+    data_ready = False
 
-# --- CHỨC NĂNG 1: SIÊU SAO THEO DÕI (TỪ FILE sieu_sao_theo_doi.py) ---
-if btn_sieu_sao:
-    st.subheader("🔥 Bảng Theo Dõi Siêu Sao Real-time")
+# --- CHỨC NĂNG: SIÊU SAO THEO DÕI ---
+if data_ready and btn_sieu_sao:
+    st.subheader("🔥 Tổng Quan Siêu Sao (Dữ liệu từ hose.csv)")
     watch_list = ['SSI', 'VND', 'DIG', 'SHB', 'HPG', 'VPB', 'GEX', 'MBB', 'VHM', 'VIC', 'VGI']
-    kq_sao = []
+    kq = []
     
-    vni_c = vni['Close'].values.flatten()
-    vni_change = (vni_c[-1] / vni_c[-5] - 1) * 100
-    
-    with st.spinner("Đang check tín hiệu dòng tiền..."):
-        for t in watch_list:
-            d = yf.download(f"{t}.VN", period="20d", progress=False)
-            if not d.empty:
-                d = calculate_all(d, vni)
-                l = d.iloc[-1]
-                # Logic xác nhận nổ từ code của bạn
-                trigger_p = d['High'].iloc[-2:].max()
-                rs_score = round(l['RS'], 2)
-                
-                if l['Close'] >= trigger_p and rs_score > 0:
-                    advice = ">>> MUA <<<"
-                    status = "XÁC NHẬN NỔ 🔥"
-                elif l['Close'] >= trigger_p and rs_score <= 0:
-                    advice = "BẪY BULLTRAP ⚠️"
-                    status = "HỒI ẢO"
-                else:
-                    advice = "Theo dõi"
-                    status = "Đang rũ"
-                
-                kq_sao.append({
-                    "Mã": t, "Giá Live": int(l['Close']), "Điểm RS": rs_score,
-                    "Tín Hiệu": status, "Lời Khuyên": advice,
-                    "Target": int(l['Close']*1.15), "Stoploss": int(l['Close']*0.93)
-                })
-        st.table(pd.DataFrame(kq_sao))
-        st.caption("💡 CẢNH BÁO: Chỉ vào lệnh khi tín hiệu là '>>> MUA <<<' và RS dương.")
+    for t in watch_list:
+        df_mã = df_hose_all[df_hose_all['symbol'] == t].copy().sort_values('date')
+        if not df_mã.empty:
+            df_mã = calculate_technical_indices(df_mã, df_vni_all)
+            l = df_mã.iloc[-1]
+            
+            trigger_p = df_mã['high'].iloc[-2:].max()
+            status = "XÁC NHẬN NỔ 🔥" if l['close'] >= trigger_p and l['rs_score'] > 0 else "Theo dõi"
+            
+            kq.append({
+                "Mã": t, "Giá": int(l['close']), "Điểm RS": l['rs_score'],
+                "Trạng Thái": status, "RSI": round(l['rsi'], 1),
+                "Target": int(l['close'] * 1.15), "Stoploss": int(l['close'] * 0.93)
+            })
+    st.table(pd.DataFrame(kq))
 
-# --- CHỨC NĂNG 2: LỌC ĐIỂM MUA & BOM ---
-if btn_loc:
-    st.subheader("🔍 Kết Quả Lọc Điểm Mua & Quả Bom")
-    # Tự động lấy list từ file hose.csv nếu có
-    try:
-        mã_list = pd.read_csv("hose.csv")['symbol'].tolist()[:100]
-    except:
-        mã_list = ['VGI', 'DIG', 'DXG', 'GEX', 'HPG', 'SSI', 'PDR', 'VNM']
-        
-    kq_loc = []
-    bar = st.progress(0)
-    for i, m in enumerate(mã_list):
-        d = yf.download(f"{m}.VN", period="60d", progress=False)
-        if not d.empty:
-            d = calculate_all(d, vni)
-            l = d.iloc[-1]
-            if l['BUY'] or l['BOMB']:
-                kq_loc.append({
-                    "Mã": m, "Giá": int(l['Close']), "ADX": round(l['ADX'],1), 
-                    "RSI": round(l['RSI'],1), "Trạng Thái": "MUA 🚀" if l['BUY'] else "BOM 💣"
-                })
-        bar.progress((i+1)/len(mã_list))
-    st.dataframe(pd.DataFrame(kq_loc), use_container_width=True)
+# --- CHỨC NĂNG: SOI CHI TIẾT CHART ---
+if data_ready and ticker_input:
+    df_chart = df_hose_all[df_hose_all['symbol'] == ticker_input].copy().sort_values('date')
+    if not df_chart.empty:
+        df_chart = calculate_technical_indices(df_chart, df_vni_all)
+        l = df_chart.iloc[-1]
 
-# --- CHỨC NĂNG 3: SOI CHI TIẾT CHART ---
-if ticker_input:
-    df = yf.download(f"{ticker_input}.VN", period="1y", progress=False)
-    if not df.empty:
-        df = calculate_all(df, vni)
-        l = df.iloc[-1]
-        
-        # Vẽ biểu đồ 3 tầng
+        # Đồ thị 3 tầng
         fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.5, 0.2, 0.3])
         
-        # Tầng 1: Nến + Target + Buy/Bom
-        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Giá'), row=1, col=1)
+        # Tầng 1: Candle
+        fig.add_trace(go.Candlestick(x=df_chart['date'], open=df_chart['open'], high=df_chart['high'], 
+                                     low=df_chart['low'], close=df_chart['close'], name='Giá'), row=1, col=1)
         
-        t1, sl = float(l['Close']*1.07), float(l['Close']*0.94)
-        fig.add_hline(y=t1, line_dash="dash", line_color="lime", annotation_text="Target 1 (7%)", row=1, col=1)
-        fig.add_hline(y=sl, line_dash="dash", line_color="red", annotation_text="Stoploss", row=1, col=1)
+        # Target & Stoploss
+        t1, sl = float(l['close']*1.07), float(l['close']*0.94)
+        fig.add_hline(y=t1, line_dash="dash", line_color="lime", annotation_text="T1", row=1, col=1)
+        fig.add_hline(y=sl, line_dash="dash", line_color="red", annotation_text="SL", row=1, col=1)
 
-        buy_df = df[df['BUY']]
-        fig.add_trace(go.Scatter(x=buy_df.index, y=buy_df['Low']*0.98, mode='markers+text', text="MUA", marker=dict(symbol='triangle-up', size=15, color='lime')), row=1, col=1)
-        bomb_df = df[df['BOMB']]
-        fig.add_trace(go.Scatter(x=bomb_df.index, y=bomb_df['High']*1.02, mode='text', text="💣"), row=1, col=1)
+        # MUA & BOM
+        buy_pts = df_chart[df_chart['is_buy']]
+        fig.add_trace(go.Scatter(x=buy_pts['date'], y=buy_pts['low']*0.98, mode='markers', 
+                                 marker=dict(symbol='triangle-up', size=12, color='lime'), name='MUA'), row=1, col=1)
+        
+        bomb_pts = df_chart[df_chart['bomb']]
+        fig.add_trace(go.Scatter(x=bomb_pts['date'], y=bomb_pts['high']*1.02, mode='text', text="💣", name='BOM'), row=1, col=1)
 
         # Tầng 2: Volume
-        fig.add_trace(go.Bar(x=df.index, y=df['Volume'], name='Khối lượng', marker_color='gray'), row=2, col=1)
+        fig.add_trace(go.Bar(x=df_chart['date'], y=df_chart['volume'], name='Vol', marker_color='gray'), row=2, col=1)
 
-        # Tầng 3: ADX & RSI & RS
-        fig.add_trace(go.Scatter(x=df.index, y=df['ADX'], line=dict(color='cyan'), name='ADX'), row=3, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='orange'), name='RSI'), row=3, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['RS'], line=dict(color='magenta', dash='dot'), name='Điểm RS'), row=3, col=1)
+        # Tầng 3: Chỉ báo
+        fig.add_trace(go.Scatter(x=df_chart['date'], y=df_chart['rsi'], line=dict(color='orange'), name='RSI'), row=3, col=1)
+        fig.add_trace(go.Scatter(x=df_chart['date'], y=df_chart['rs_score'], line=dict(color='magenta', dash='dot'), name='RS Score'), row=3, col=1)
         
         fig.update_layout(height=800, template="plotly_dark", xaxis_rangeslider_visible=False)
         st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning(f"Không tìm thấy mã {ticker_input} trong file hose.csv")
