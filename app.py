@@ -8,9 +8,9 @@ import base64
 import requests
 
 # --- CẤU HÌNH ---
-GITHUB_TOKEN = "YOUR_GITHUB_TOKEN"  # Thay token của bạn vào đây
+GITHUB_TOKEN = "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"  # Thay token của bạn vào đây
 REPO_NAME = "san-song" # Tên repository của bạn
-GITHUB_USER = "TEN_CUA_BAN" # Tên user GitHub của bạn
+GITHUB_USER = "lenghiapvdwell-star" # Tên user GitHub của bạn
 
 st.set_page_config(page_title="Hệ Thống Săn Sóng V21", layout="wide")
 
